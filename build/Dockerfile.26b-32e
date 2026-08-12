@@ -1,0 +1,53 @@
+# Gemma-4-26B-A4B-it-QAT (Q4_0) — multimodal, 256K context, expert_used=32
+# Image: llama-26b-32e:latest
+# Port: 64000 | Config: ngl 17 (multimodal), ctx 262144 (256K), q4_0 KV, reasoning on
+# 256K ctx as requested by user
+# Architecture: gemma4 — multimodal variant with mmproj vision projector.
+# --override-kv gemma4.expert_used_count=int:32 reduces MoE experts from default to 32.
+# Model path: /models/lmstudio-community/gemma-4-26B-A4B-it-QAT-GGUF/
+# mmproj path: /models/lmstudio-community/gemma-4-26B-A4B-it-QAT-GGUF/mmproj-...-BF16.gguf
+#
+# ─── HARDENED: All flags baked in. Runtime overrides ignored. ───
+# Uses llama-locked.26b-32e.sh as the ENTRYPOINT. Any args passed to docker run are
+# rejected with a warning. Configuration is locked in the image.
+FROM nvidia/cuda:12.8.0-devel-ubuntu24.04 AS builder
+
+RUN apt-get update && apt-get install -y \
+    build-essential cmake git curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone --depth 1 https://github.com/ggml-org/llama.cpp.git /llama.cpp
+WORKDIR /llama.cpp
+
+RUN cmake -B build \
+    -DGGML_CUDA=ON \
+    -DCMAKE_CUDA_ARCHITECTURES=120 \
+    -DLLAMA_CURL=OFF \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_SHARED_LIBS=OFF \
+    && cmake --build build --config Release --target llama-server -j$(nproc) 2>&1 || \
+    cmake -B build \
+    -DGGML_CUDA=ON \
+    -DCMAKE_CUDA_ARCHITECTURES=120 \
+    -DLLAMA_CURL=OFF \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_SHARED_LIBS=OFF \
+    -DCMAKE_EXE_LINKER_FLAGS="-L/usr/lib/stubs -Wl,--allow-shlib-undefined" \
+    -DCMAKE_SHARED_LINKER_FLAGS="-L/usr/lib/stubs -Wl,--allow-shlib-undefined" \
+    && cmake --build build --config Release --target llama-server -j$(nproc)
+
+# Runtime image
+FROM nvidia/cuda:12.8.0-runtime-ubuntu24.04
+
+RUN apt-get update && apt-get install -y \
+    libgomp1 curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /llama.cpp/build/bin/llama-server /usr/local/bin/
+
+COPY scripts/llama-locked.26b-32e.sh /usr/local/bin/llama-locked.26b-32e.sh
+RUN chmod +x /usr/local/bin/llama-locked.26b-32e.sh
+
+EXPOSE 64000
+
+ENTRYPOINT ["/usr/local/bin/llama-locked.26b-32e.sh"]

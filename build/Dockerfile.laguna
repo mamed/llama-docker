@@ -1,0 +1,76 @@
+# Laguna XS 2.1 (Poolside) — 256K context, 256-expert MoE
+# Image: llama-laguna-xs:latest
+# ════════════════════════════════════════════════════════════════════
+# 🔒 LOCKED CONFIG — DO NOT MODIFY WITHOUT REBUILDING THE IMAGE 🔒
+# ════════════════════════════════════════════════════════════════════
+# All runtime config is baked into /usr/local/bin/llama-locked.laguna.sh.
+# Runtime args passed via `docker run …` are WARNED and IGNORED.
+# To change config: edit THIS file + scripts/llama-locked.laguna.sh,
+# then `docker build` again. There is no way to mutate config at runtime.
+#
+# ─── CONFIG (locked 2026-07-27 — Laguna XS 2.1 first probe) ───
+# Port:    64007
+# ngl:     99                         (max layer depth on GPU; auto-fit will partial-offload)
+# no-mmap: ON
+# ctx:     262144                     (256K — native train ctx)
+# KV:      q4_0 / q4_0                (KV cache Q4; ~1.25 KiB/token)
+# batch:   -b 2048                    (logical batch — +19% prompt t/s)
+# threads: -t 16                      (16 CPU threads for prompt eval + MoE paging)
+# Reason:  unlimited (--reasoning-budget -1)
+# chat-template: GGUF-embedded permissive jinja (Laguna ships its own)
+#
+# Architecture: laguna (custom) — 40 layers, 256 experts (8 active), 18.88 GiB on disk.
+# Total params: ~563B (256 × 2.2B). Active per token: ~17.6B.
+#
+# Expected first-run memory profile (RTX 5070 Ti 12 GB):
+#   - Full model weight (FP4) at partial offload: ~10-11 GiB
+#   - KV cache at q4_0 for 256k ctx: ~320 MiB (KV head 8, key_len 128)
+#   - Compute workspace: ~260 MiB
+#   - Total: ~11.5-12 GiB  →  leaves only ~50-200 MiB headroom on 12 GiB
+#
+# Notes:
+#   - llama-server on cuda-12.8 needs libcudart.so.12 etc — the runtime base
+#     image (`nvidia/cuda:12.8.0-runtime-ubuntu24.04`) already ships those.
+#   - We pass `-ngl 99` but on this model the auto-fit will partial-offload
+#     based on available VRAM. To bisect manually, override the launcher.
+#
+# ─── HARDENING ───
+#   1. Launcher baked into image at /usr/local/bin/llama-locked.laguna.sh
+#      - Mode 0555 (read+execute, NO write), owned by root:root
+#      - Launcher verifies its own sha256 against baked value; mismatch → exit 78
+#   2. ENTRYPOINT is the locked launcher; CMD is empty (runtime args ignored)
+#   3. Container runs with --read-only rootfs and --cap-drop=ALL
+#   4. To change config: edit this Dockerfile + launcher, rebuild.
+
+# v6-r1 reuse: bake in the same llama-server we already built (master @ 0324696).
+# The laguna arch landed upstream, so this binary supports it.
+FROM nvidia/cuda:12.8.0-runtime-ubuntu24.04
+
+RUN apt-get update && apt-get install -y \
+    libgomp1 curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY binaries-v6-r1/llama-server /usr/local/bin/llama-server
+
+# ── Locked launcher (source of truth) ──
+COPY scripts/llama-locked.laguna.sh /usr/local/bin/llama-locked.laguna.sh
+
+RUN chmod 0555 /usr/local/bin/llama-locked.laguna.sh \
+    && chown root:root /usr/local/bin/llama-locked.laguna.sh \
+    && sha256sum /usr/local/bin/llama-locked.laguna.sh > /usr/local/bin/llama-locked.laguna.sh.sha256
+
+# Locked config ENVs (informational only — the launcher uses literal flags, not these)
+ENV HOST=0.0.0.0
+ENV PORT=64007
+ENV NGL=99
+ENV CTX=262144
+ENV CTK=q4_0
+ENV CTV=q4_0
+ENV PARALLEL=1
+ENV REASONING_BUDGET=-1
+
+EXPOSE 64007
+
+# Locked entrypoint; CMD intentionally empty so `docker run … <args>` is a no-op.
+ENTRYPOINT ["/usr/local/bin/llama-locked.laguna.sh"]
+CMD []

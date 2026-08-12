@@ -1,0 +1,70 @@
+# Gemma 4 12B — Dedicated image with all config baked in
+# Port: 64001
+# Config: -ngl 99, ctx 262K, q8_0 KV, parallel=1, multimodal ON, reasoning unlimited (-1), agent
+# Multimodal enabled (mmproj q4_0, ~168 MiB) — no meaningful VRAM cost, preserves vision
+# KV cache q8_0 — best balance of precision and VRAM for the 12 GB card
+# Parallel=1 (single concurrent slot) — leaves headroom for full 262K ctx
+# Reasoning budget 32768 → unlimited (-1) on 2026-07-25
+# All args baked via locked launcher: /usr/local/bin/llama-locked.12b.sh
+# Tested baseline (was running 6h healthy before any of today's tweaks)
+FROM nvidia/cuda:12.8.0-devel-ubuntu24.04 AS builder
+
+RUN apt-get update && apt-get install -y \
+    build-essential cmake git curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone --depth 1 https://github.com/ggml-org/llama.cpp.git /llama.cpp
+WORKDIR /llama.cpp
+
+RUN cmake -B build \
+    -DGGML_CUDA=ON \
+    -DCMAKE_CUDA_ARCHITECTURES=120 \
+    -DLLAMA_CURL=OFF \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_SHARED_LIBS=OFF \
+    && cmake --build build --config Release --target llama-server -j$(nproc) 2>&1 || \
+    cmake -B build \
+    -DGGML_CUDA=ON \
+    -DCMAKE_CUDA_ARCHITECTURES=120 \
+    -DLLAMA_CURL=OFF \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_SHARED_LIBS=OFF \
+    -DCMAKE_EXE_LINKER_FLAGS="-L/usr/lib/stubs -Wl,--allow-shlib-undefined" \
+    -DCMAKE_SHARED_LINKER_FLAGS="-L/usr/lib/stubs -Wl,--allow-shlib-undefined" \
+    && cmake --build build --config Release --target llama-server -j$(nproc)
+
+# Runtime image
+FROM nvidia/cuda:12.8.0-runtime-ubuntu24.04
+
+RUN apt-get update && apt-get install -y \
+    libgomp1 curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /llama.cpp/build/bin/llama-server /usr/local/bin/
+COPY scripts/llama-locked.12b.sh /usr/local/bin/llama-locked.12b.sh
+RUN chmod +x /usr/local/bin/llama-locked.12b.sh
+
+# ─── Model config baked in ───
+ENV MODEL_PATH=/models/google/gemma-4-12B-it-qat-q4_0-gguf/gemma-4-12b-it-qat-q4_0.gguf
+ENV MMPROJ_PATH=/models/google/gemma-4-12B-it-qat-q4_0-gguf/mmproj-gemma-4-12b-it-qat-q4_0.gguf
+ENV HOST=0.0.0.0
+ENV PORT=64001
+ENV NGL=99
+ENV CTX=262144
+ENV CTK=q8_0
+ENV CTV=q8_0
+ENV PARALLEL=1
+ENV REASONING_BUDGET=-1
+
+EXPOSE 64001
+
+ENTRYPOINT ["/usr/local/bin/llama-locked.12b.sh"]
+CMD ["-m", "/models/google/gemma-4-12B-it-qat-q4_0-gguf/gemma-4-12b-it-qat-q4_0.gguf", \
+     "--mmproj", "/models/google/gemma-4-12B-it-qat-q4_0-gguf/mmproj-gemma-4-12b-it-qat-q4_0.gguf", \
+     "--host", "0.0.0.0", "--port", "64001", \
+     "-ngl", "99", "--ctx-size", "262144", \
+     "-ctk", "q8_0", "-ctv", "q8_0", \
+     "--parallel", "1", "--cont-batching", \
+     "-fa", "on", \
+     "--reasoning", "on", "--reasoning-budget", "-1", \
+     "--agent"]

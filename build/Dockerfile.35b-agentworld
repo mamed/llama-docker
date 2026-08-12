@@ -1,0 +1,127 @@
+# Qwen3.5 AgentWorld 35B-A3B (Q4_K_XL) — 256K context, MoE hybrid
+# Image: llama-qwen-35b-agentworld:latest
+# ════════════════════════════════════════════════════════════════════
+# 🔒 LOCKED CONFIG — DO NOT MODIFY WITHOUT REBUILDING THE IMAGE 🔒
+# ════════════════════════════════════════════════════════════════════
+# All runtime config is baked into /usr/local/bin/llama-locked.35b.sh.
+# Runtime args passed via `docker run …` are WARNED and IGNORED.
+# To change config: edit THIS file + scripts/llama-locked.35b.sh,
+# then `docker build` again. There is no way to mutate config at runtime.
+#
+# ─── CONFIG (locked 2026-07-27 — Q4_K_XL v6, 6 expert blocks on GPU) ───
+# Port:    64006
+# ngl:     99                         (max layer depth on GPU)
+# n-cpu-moe: 0..9, 10..19, 26..47 → CPU
+#           20..25 → GPU              (6 expert blocks — Q4_K_XL sweet spot
+#                                       at 12 GB / ctx=256k w/ sustained perf;
+#                                       K=7 OOM'd on compute workspace)
+# no-mmap: ON                         (recommended w/ --override-tensor)
+# ctx:     262144                     (256K — native train ctx)
+# KV:      q4_0 / q4_0                (KV cache Q4; ~2.50 KiB/token, 640 MiB at max ctx)
+# batch:   -b 2048                    (logical batch — +19% prompt t/s)
+# threads: -t 16                      (16 CPU threads for prompt eval + MoE paging)
+# Reason:  unlimited (--reasoning-budget -1), agent mode on
+#
+# ────────── BISECT HISTORY (2026-07-27, RTX 5070 Ti Laptop 12 GB, AC power) ──────────
+# Quantization trade-off (v5 IQ4_NL → v6 Q4_K_XL):
+#   - Q4_K_XL is +20 % model size (17.3 → 20.8 GiB) → −3 expert blocks on GPU vs v5
+#   - Trade buys better reasoning accuracy (Q6_K tail + Q8 anchors; no imatrix bias)
+#
+# VRAM cliff (one-block steps, K=4..8):
+#   K=4 (20-23):  10 777 MiB used,  998 free  ✅
+#   K=5 (20-24):  11 239 MiB used,  536 free  ✅
+#   K=6 (20-25):  11 703 MiB used,   72 free  ✅   ← LOCK (Q4_K_XL sweet spot)
+#   K=7 (20-26):        – OOM compute workspace wall     ❌
+#   K=8 (20-27):        – OOM compute workspace wall     ❌
+#
+# Locked measured numbers (16 trials/case, 2 warmup dropped, AC power):
+#   gen t/s ceiling: 56-67 across tiny / short / medium / long / verylong prompts
+#   prompt t/s:     104 (tiny) → 22 416 (long 4.8 k) → 69 445 (verylong 23 k)
+#   single-request σ < 0.020 s on every case
+#   sustained 4-way × 120 s @ medium:  426 reqs, 0 failed, 56.8 gen t/s, p95 1.146 s
+#   concurrency matrix 1/2/4/8 workers:  55.5 / 57.1 / 58.1 / 59.7 gen t/s
+#   max power 108 W, max temp 71 °C, max VRAM 11 755 MiB
+#
+# Architecture: qwen35moe — hybrid (attention every 4 layers + SSM), 40 layers, 16 attn heads,
+# 2 KV heads, head_dim 256, 256 experts (8 active per token), 20.79 GiB on disk.
+#
+# ─── HARDENING (in order of enforceability) ───
+#   1. Launcher baked into image at /usr/local/bin/llama-locked.35b.sh
+#      - Mode 0555 (read+execute, NO write), owned by root:root
+#      - chattr +i (immutable bit) — cannot be modified, deleted, or replaced
+#      - Launcher also verifies its own sha256 against baked value; if mismatch,
+#        exits with code 78 (config error).
+#   2. ENTRYPOINT is the locked launcher; CMD is empty (runtime args ignored)
+#   3. Container runs with --read-only rootfs and --cap-drop=ALL
+#   4. Immutable tarball saved at /home/fekry/llama-docker/llama-qwen-35b-agentworld.locked-256k-q4kv-v4.tar
+#   5. To change config: edit this Dockerfile + launcher, rebuild, re-snapshot.
+
+FROM nvidia/cuda:12.8.0-devel-ubuntu24.04 AS builder
+
+RUN apt-get update && apt-get install -y \
+    build-essential cmake git curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone --depth 1 https://github.com/ggml-org/llama.cpp.git /llama.cpp
+WORKDIR /llama.cpp
+
+RUN cmake -B build \
+    -DGGML_CUDA=ON \
+    -DCMAKE_CUDA_ARCHITECTURES=120 \
+    -DLLAMA_CURL=OFF \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_SHARED_LIBS=OFF \
+    && cmake --build build --config Release --target llama-server -j$(nproc) 2>&1 || \
+    cmake -B build \
+    -DGGML_CUDA=ON \
+    -DCMAKE_CUDA_ARCHITECTURES=120 \
+    -DLLAMA_CURL=OFF \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_SHARED_LIBS=OFF \
+    -DCMAKE_EXE_LINKER_FLAGS="-L/usr/lib/stubs -Wl,--allow-shlib-undefined" \
+    -DCMAKE_SHARED_LINKER_FLAGS="-L/usr/lib/stubs -Wl,--allow-shlib-undefined" \
+    && cmake --build build --config Release --target llama-server -j$(nproc)
+
+# Runtime image
+FROM nvidia/cuda:12.8.0-runtime-ubuntu24.04
+
+RUN apt-get update && apt-get install -y \
+    libgomp1 curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# v6-r1: replace in-image compile with our pre-built llama-server (cuda-12.8,
+# llama.cpp master as of 2026-07-27 commit 0324696). This avoids the 8-10 min
+# compile inside the build stage and keeps the toolchain pinned.
+COPY binaries-v6-r1/llama-server /usr/local/bin/llama-server
+
+# ── Locked launcher (source of truth) ──
+COPY scripts/llama-locked.35b.sh /usr/local/bin/llama-locked.35b.sh
+
+# Lock the launcher: read+exec only, owned by root, immutable bit set.
+# This makes it impossible for anyone (including root inside the container,
+# or any docker exec session) to modify the launcher at runtime.
+RUN chmod 0555 /usr/local/bin/llama-locked.35b.sh \
+    && chown root:root /usr/local/bin/llama-locked.35b.sh \
+    && sha256sum /usr/local/bin/llama-locked.35b.sh > /usr/local/bin/llama-locked.35b.sh.sha256
+
+# Custom permissive chat template (overrides GGUF-embedded strict template)
+# Fixes Codex CLI compatibility by allowing system messages anywhere in the order.
+COPY templates/qwen35-permissive.jinja /usr/local/share/llama-server/qwen35-permissive.jinja
+RUN chmod 0444 /usr/local/share/llama-server/qwen35-permissive.jinja \
+    && chown root:root /usr/local/share/llama-server/qwen35-permissive.jinja
+
+# Locked config ENVs (informational only — the launcher uses literal flags, not these)
+ENV HOST=0.0.0.0
+ENV PORT=64006
+ENV NGL=99
+ENV CTX=262144
+ENV CTK=q4_0
+ENV CTV=q4_0
+ENV PARALLEL=1
+ENV REASONING_BUDGET=-1
+
+EXPOSE 64006
+
+# Locked entrypoint; CMD intentionally empty so `docker run … <args>` is a no-op.
+ENTRYPOINT ["/usr/local/bin/llama-locked.35b.sh"]
+CMD []

@@ -1,0 +1,180 @@
+# llama.cpp Docker Compose — RTX 5070 Ti 12GB
+# Models, images, containers. Some images have multiple profiles (e.g. full vs partial GPU).
+# Each image has all config baked in (full-GPU variants); partial-GPU variants override via command:.
+#
+# Usage:
+#   docker compose --profile gemma-4-26b up -d           # full 26B-8e on 64002
+#   docker compose --profile gemma-4-26b-32e up -d       # full 26B-32e on 64000 (DEFAULT)
+#   docker compose --profile gemma-4-12b up -d           # full 12B on 64001 (needs ~6.6 GiB VRAM)
+#   docker compose --profile gemma-4-12b-small up -d     # partial-offload 12B on 64001 (co-resides with 26B)
+#   docker compose ps
+
+services:
+
+  # ═══════════════════════════════════════════════
+  #  Gemma 4 26B QAT — 32 Experts (port 64002)
+  #  Config: -ngl 18, ctx 237K, q4_0 KV, 32 experts
+  #  Multimodal, reasoning, agent, CUDA
+  #  ** DEFAULT — 100% accuracy, 21.7 t/s **
+  # ═══════════════════════════════════════════════
+  gemma-4-26b-32e:
+    profiles: [gemma-4-26b-32e]
+    image: llama-26b-32e:latest
+    container_name: llama-gemma4-26b-32e
+    restart: always
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu, utility]
+    volumes:
+      - /run/media/fekry/OS shared/LLM-Models:/models:ro
+    ports: ["64000:64000"]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=0
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf --max-time 5 http://127.0.0.1:64000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 180s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  # ═══════════════════════════════════════════════
+  #  Gemma 4 12B — Speed-first (port 64001)
+  #  Config: -ngl 99, ctx 262K, q8_0 KV, CUDA
+  # ═══════════════════════════════════════════════
+  gemma-4-12b:
+    profiles: [gemma-4-12b]
+    image: llama-12b:8192budget
+    container_name: llama-gemma4-12b
+    restart: on-failure
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu, utility]
+    volumes:
+      - /run/media/fekry/OS shared/LLM-Models:/models:ro
+    ports: ["64001:64001"]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=0
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf --max-time 5 http://127.0.0.1:64001/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 180s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  # ═══════════════════════════════════════════════
+  #  Gemma 4 26B — Original 8 Experts (port 64002)
+  #  Config: -ngl 18, ctx 237K, q4_0 KV, 8 experts
+  #  Backup/fallback — 18.75% accuracy, 38 t/s
+  # ═══════════════════════════════════════════════
+  gemma-4-26b:
+    profiles: [gemma-4-26b]
+    image: llama-26b:latest
+    container_name: llama-gemma4-26b
+    restart: on-failure
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu, utility]
+    volumes:
+      - /run/media/fekry/OS shared/LLM-Models:/models:ro
+    ports: ["64002:64002"]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=0
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf --max-time 5 http://127.0.0.1:64002/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 180s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  # ═══════════════════════════════════════════════
+  #  Gemma 4 12B — Co-resident (port 64001, --profile gemma-4-12b-small)
+  #  Config: -ngl 5, ctx 32K, q4_0 KV — partial offload so it CO-RESIDES with 26B-32E
+  #  ~3.2 GiB VRAM weights + ~600 MB KV; same port 64001; different container_name.
+  #  Use when you want BOTH models live at once. Throughput is lower (~5-10 t/s) since most layers
+  #  live on CPU.
+  # ═══════════════════════════════════════════════
+  gemma-4-12b-small:
+    profiles: [gemma-4-12b-small]
+    image: llama-12b:8192budget
+    container_name: llama-gemma4-12b-small
+    restart: on-failure
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu, utility]
+    volumes:
+      - /run/media/fekry/OS shared/LLM-Models:/models:ro
+    ports: ["64001:64001"]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=0
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    command:
+      - "-m"
+      - "/models/google/gemma-4-12B-it-qat-q4_0-gguf/gemma-4-12b-it-qat-q4_0.gguf"
+      - "--mmproj"
+      - "/models/google/gemma-4-12B-it-qat-q4_0-gguf/mmproj-gemma-4-12b-it-qat-q4_0.gguf"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "64001"
+      - "-ngl"
+      - "3"
+      - "--ctx-size"
+      - "4096"
+      - "-ctk"
+      - "q4_0"
+      - "-ctv"
+      - "q4_0"
+      - "--parallel"
+      - "1"
+      - "--cont-batching"
+      - "-fa"
+      - "on"
+      - "--reasoning"
+      - "on"
+      - "--reasoning-budget"
+      - "2048"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf --max-time 5 http://127.0.0.1:64001/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 240s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
