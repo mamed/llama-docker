@@ -1,0 +1,63 @@
+# Qwen3-Coder-30B-A3B-Instruct (UD-Q4_K_XL) — 256K context, MoE coder agent
+# Image: llama-qwen3-coder-30b:latest
+# Port: 64007 | Config: max ctx 256K, 9 FFN-expert blocks on GPU, q4_0 KV
+# Architecture: qwen3moe — pure transformer (no SSM), 48 layers, 32 attn heads,
+# 4 KV heads, head_dim 64, 128 experts (8 active per token), 16.5 GB on disk.
+# Native tool-call training: this model drives the agent loop (file edits, shell) properly.
+# On 12 GB GPU, full model (~17 GB raw) doesn't fit. Strategy:
+#   - -ngl 99 = all non-MoE layers to GPU (attention, embeddings, output, shared)
+#   - Override FFN expert tensors (blk.*.ffn.*_exps) for blocks 9-47 to CPU
+#   - Blocks 0-8 keep FFN experts on GPU (9 of 48 layers)
+#   - KV cache at 256K q4_0 = 6.75 GB (fixed, dominant cost)
+#   - Empirically tested sweet spot at max ctx 256K: 9 blocks on GPU → 11.71 GB / 65 MiB free.
+# Reasoning budget -1 (unlimited) to match the rest of the fleet.
+#
+# ─── HARDENED: All flags baked in. Runtime overrides ignored. ───
+# Uses llama-locked.sh as the ENTRYPOINT. Any args passed to docker run are
+# rejected with a warning. Configuration is locked in the image.
+FROM nvidia/cuda:12.8.0-devel-ubuntu24.04 AS builder
+
+RUN apt-get update && apt-get install -y \
+    build-essential cmake git curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone --depth 1 https://github.com/ggml-org/llama.cpp.git /llama.cpp
+WORKDIR /llama.cpp
+
+RUN cmake -B build \
+    -DGGML_CUDA=ON \
+    -DCMAKE_CUDA_ARCHITECTURES=120 \
+    -DLLAMA_CURL=OFF \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_SHARED_LIBS=OFF \
+    && cmake --build build --config Release --target llama-server -j$(nproc) 2>&1 || \
+    cmake -B build \
+    -DGGML_CUDA=ON \
+    -DCMAKE_CUDA_ARCHITECTURES=120 \
+    -DLLAMA_CURL=OFF \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_SHARED_LIBS=OFF \
+    -DCMAKE_EXE_LINKER_FLAGS="-L/usr/lib/stubs -Wl,--allow-shlib-undefined" \
+    -DCMAKE_SHARED_LINKER_FLAGS="-L/usr/lib/stubs -Wl,--allow-shlib-undefined" \
+    && cmake --build build --config Release --target llama-server -j$(nproc)
+
+# Runtime image
+FROM nvidia/cuda:12.8.0-runtime-ubuntu24.04
+
+RUN apt-get update && apt-get install -y \
+    libgomp1 curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /llama.cpp/build/bin/llama-server /usr/local/bin/
+
+# Native chat template extracted from GGUF metadata
+COPY templates/qwen3-coder-native.jinja /usr/local/share/llama-server/qwen3-coder-native.jinja
+
+# Hardened launcher: ignores runtime overrides.
+# Anyone who passes flags via `docker run <flags>` gets a warning and is ignored.
+COPY scripts/llama-locked.sh /usr/local/bin/llama-locked.sh
+RUN chmod +x /usr/local/bin/llama-locked.sh
+
+EXPOSE 64007
+
+ENTRYPOINT ["/usr/local/bin/llama-locked.sh"]

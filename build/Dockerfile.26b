@@ -1,0 +1,63 @@
+# Gemma 4 26B — TEXT-ONLY (no mmproj)
+# Image: llama-26b-text:latest
+# HARDENED: All flags baked into locked launcher. Runtime overrides ignored.
+# Port: 64003 | Config: -ngl 20, ctx 224*1024=229376, q4_0 KV, reasoning unlimited (-1), agent
+FROM nvidia/cuda:12.8.0-devel-ubuntu24.04 AS builder
+
+RUN apt-get update && apt-get install -y \
+    build-essential cmake git curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone --depth 1 https://github.com/ggml-org/llama.cpp.git /llama.cpp
+WORKDIR /llama.cpp
+
+RUN cmake -B build \
+    -DGGML_CUDA=ON \
+    -DCMAKE_CUDA_ARCHITECTURES=120 \
+    -DLLAMA_CURL=OFF \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_SHARED_LIBS=OFF \
+    && cmake --build build --config Release --target llama-server -j$(nproc) 2>&1 || \
+    cmake -B build \
+    -DGGML_CUDA=ON \
+    -DCMAKE_CUDA_ARCHITECTURES=120 \
+    -DLLAMA_CURL=OFF \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_SHARED_LIBS=OFF \
+    -DCMAKE_EXE_LINKER_FLAGS="-L/usr/lib/stubs -Wl,--allow-shlib-undefined" \
+    -DCMAKE_SHARED_LINKER_FLAGS="-L/usr/lib/stubs -Wl,--allow-shlib-undefined" \
+    && cmake --build build --config Release --target llama-server -j$(nproc)
+
+# Runtime image
+FROM nvidia/cuda:12.8.0-runtime-ubuntu24.04
+
+RUN apt-get update && apt-get install -y \
+    libgomp1 curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /llama.cpp/build/bin/llama-server /usr/local/bin/
+COPY scripts/llama-locked.26b.sh /usr/local/bin/llama-locked.26b.sh
+RUN chmod +x /usr/local/bin/llama-locked.26b.sh
+
+# ─── Model config baked in ───
+ENV MODEL_PATH=/models/google/gemma-4-26B-A4B-it-qat-q4_0-gguf/gemma-4-26B_q4_0-it.gguf
+ENV HOST=0.0.0.0
+ENV PORT=64003
+ENV NGL=20
+ENV CTX=229376
+ENV CTK=q4_0
+ENV CTV=q4_0
+ENV PARALLEL=1
+ENV REASONING_BUDGET=-1
+
+EXPOSE 64003
+
+ENTRYPOINT ["/usr/local/bin/llama-locked.26b.sh"]
+CMD ["-m", "/models/google/gemma-4-26B-A4B-it-qat-q4_0-gguf/gemma-4-26B_q4_0-it.gguf", \
+     "--host", "0.0.0.0", "--port", "64003", \
+     "-ngl", "20", "--ctx-size", "229376", \
+     "-ctk", "q4_0", "-ctv", "q4_0", \
+     "--parallel", "1", "--cont-batching", \
+     "-fa", "on", \
+     "--reasoning", "on", "--reasoning-budget", "-1", \
+     "--agent"]

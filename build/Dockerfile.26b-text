@@ -1,0 +1,48 @@
+# Gemma-4-26B-A4B-it-QAT (Q4_0) — text-only, ctx 232×1024, hard-locked
+# Image: llama-26b-text:latest
+# Port: 64003 | Config: ngl 20, ctx 235520 (230*1024), q4_0 KV, reasoning on
+# Legacy variant kept for backward compat — functionally identical to llama-26b.
+# 256K OOMs on 12 GB GPU. 235520 (230*1024) is the user-tuned sweet spot.
+# Same model/sweet spot as llama-26b-8e.
+#
+# ─── HARDENED: All flags baked in. Runtime overrides ignored. ───
+FROM nvidia/cuda:12.8.0-devel-ubuntu24.04 AS builder
+
+RUN apt-get update && apt-get install -y \
+    build-essential cmake git curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone --depth 1 https://github.com/ggml-org/llama.cpp.git /llama.cpp
+WORKDIR /llama.cpp
+
+RUN cmake -B build \
+    -DGGML_CUDA=ON \
+    -DCMAKE_CUDA_ARCHITECTURES=120 \
+    -DLLAMA_CURL=OFF \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_SHARED_LIBS=OFF \
+    && cmake --build build --config Release --target llama-server -j$(nproc) 2>&1 || \
+    cmake -B build \
+    -DGGML_CUDA=ON \
+    -DCMAKE_CUDA_ARCHITECTURES=120 \
+    -DLLAMA_CURL=OFF \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_SHARED_LIBS=OFF \
+    -DCMAKE_EXE_LINKER_FLAGS="-L/usr/lib/stubs -Wl,--allow-shlib-undefined" \
+    -DCMAKE_SHARED_LINKER_FLAGS="-L/usr/lib/stubs -Wl,--allow-shlib-undefined" \
+    && cmake --build build --config Release --target llama-server -j$(nproc)
+
+FROM nvidia/cuda:12.8.0-runtime-ubuntu24.04
+
+RUN apt-get update && apt-get install -y \
+    libgomp1 curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /llama.cpp/build/bin/llama-server /usr/local/bin/
+
+COPY scripts/llama-locked.26b-text.sh /usr/local/bin/llama-locked.26b-text.sh
+RUN chmod +x /usr/local/bin/llama-locked.26b-text.sh
+
+EXPOSE 64003
+
+ENTRYPOINT ["/usr/local/bin/llama-locked.26b-text.sh"]

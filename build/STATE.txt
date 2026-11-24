@@ -1,0 +1,35 @@
+# Toolchain state — llama.cpp docker fleet
+# Updated: 2026-07-27 (single-image policy applied)
+#
+# Rule: only one image per model. `:latest` is the canonical, stress-tested,
+# sha-locked binary. Rebuild only on toolchain change or measured regression.
+#
+baked_in_image=llama-qwen-35b-agentworld:latest sha=b94e7efda1b9
+baked_in_tarball=/home/fekry/llama-docker/llama-qwen-35b-agentworld.locked-q4kx-256k-v6.tar sha256=550c078f96f32974dc643cd250a6623d8b25e43eec9bf134c7e8d3dcb6bb87f6
+
+# Locked launcher sha inside the image
+launcher_sha=e8bf96d8f080b596366fe1712411222438064e11f603a1585a465dc336be514f
+launcher_sha_file=5582a162db205451597e85f8c8b42a81cf5e3dfc078732225d5add1603174a49
+
+# Toolchain as of this snapshot
+nvidia_driver=595.84                # latest in apt @ 2026-07-27
+cuda_toolkit_apt=cuda-toolkit-13.1.1-0ubuntu1
+nvcc_version=13.1.115
+
+# Host binary (separate from image; installed via /usr/local/bin/llama-server)
+# Note: this is the same master@0324696 we built v6-r1 from. NOT used in prod image
+# (prod image uses the Jan-2025 binary baked at build time, ~+1% faster).
+host_llama_sha=4fac3f31f9ababfe59d64ff83b5543abef801bf908e1b0c131582167a296dcc0
+host_llama_commit=0324696 (master 2026-07-27)
+
+# Measured performance (16 trials/case, AC power, 1 hot container)
+gen_t_s_ceiling=56-67
+prompt_t_s_peak=69000 (verylong 23 k)
+single_request_sigma_lt=0.04 s
+sustained_4w_120s_requests=426
+sustained_4w_120s_failed=0
+sustained_4w_120s_gen_t_s=56.8
+concurrency_8w_gen_t_s=59.7
+max_power_w=108
+max_temp_c=71
+max_vram_mib=11755
